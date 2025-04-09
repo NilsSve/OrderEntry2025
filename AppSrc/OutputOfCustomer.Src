@@ -1,0 +1,1447 @@
+﻿Use Windows.Pkg
+Use cApplication.Pkg
+
+// Set date attributes as needed
+Set_Attribute DF_SYSDATE_4_STATE To True
+Set_Attribute DF_DATE_4_STATE To False
+Set_Attribute DF_EPOCH_VALUE To 30
+
+Use Help_Ids.Inc // Developer should provide this file of help context links.
+Use cHtmlHelp.Pkg
+
+Register_Function Server Returns Handle
+Register_Function Deo_Object Returns Handle
+Register_Function Deo_Control_Object Returns Handle
+Register_Function File_Field_Index Integer iFile Integer iField Returns Integer
+
+Use DfError.Pkg                 // Error handling class and object
+Use Seq_Chnl.Pkg                // Sequential channel management
+Use Statpnl.Pkg                 // StatusPanel class
+Use File_Dlg.Pkg                // SaveAsDialog & OpenDialog class
+Use Flexml.Pkg
+
+Use oEditContextMenu.pkg
+
+Object oApplication is a cApplication
+    Set psCompany To "DataFlex Studio Test License"
+    Set psProduct To "Database Export"
+    Set psVersion To "19.9"
+    Set psProgram To "OutputOfCustomer"
+    Set psAutoOpenWorkspace To "c:\dataflex 25.0 examples\order entry\Programs\Config.ws"
+End_Object
+
+Open Customer
+
+Set_Attribute DF_FILE_MODE Of Customer.File_Number To DF_FILEMODE_READONLY
+
+Struct tSelectedField
+    String sFieldName
+    Integer iFieldNumber
+    Integer iFileNumber
+    Integer iLength
+    Integer iPrecision
+    Integer iFieldType
+End_Struct
+
+Enum_List
+    Define C_EXPORTFORMAT_COMMADELIMITED For 1
+    Define C_EXPORTFORMAT_LINEDELIMITED
+    Define C_EXPORTFORMAT_PRINTABLE
+    Define C_EXPORTFORMAT_XML
+End_Enum_List
+
+Enum_List
+    Define C_UTF8_ENCODING
+    Define C_ANSI_ENCODING
+    Define C_OEM_ENCODING
+End_Enum_List
+
+Define DF_NUMBER_FILES_SUPPORTED For |CI27
+
+// Maximum number of slots in the filelist
+Function MaxFilelistSlotCount Returns Integer
+    Integer iMaxSlots
+
+    Get_Attribute DF_NUMBER_FILES_SUPPORTED To iMaxSlots
+    If (iMaxSlots <= 255) Begin
+        Move 250 To iMaxSlots
+    End
+
+    Function_Return iMaxSlots
+End_Function
+
+Define LOCALE_SLIST For |CI$0000000C   // list item separator
+
+// This function reads the locale list separator and returns the characters stored
+Function LocaleListSeparator Global Returns String
+    WString wsSeparator
+    Integer iRetval
+
+    Move (GetLocaleInfoW (LOCALE_USER_DEFAULT, LOCALE_SLIST, 0, 0)) To iRetVal
+    Move (ZeroString (iRetval)) To wsSeparator
+    Move (GetLocaleInfoW (LOCALE_USER_DEFAULT, LOCALE_SLIST, AddressOf (wsSeparator), iRetval)) To iRetVal
+
+    Function_Return (Cstring (wsSeparator))
+End_Function
+
+// This function does round a numeric value based on a given rounding
+// position using strings to avoid the usual problems with capacity of
+// integers that are used with the DataFlex ROUND function.
+Function RoundDecimal String sData Integer iDecimalSeparatorPos Integer iRoundPos Returns String
+    Integer iDigit
+
+    If ((iRoundPos - 1) = iDecimalSeparatorPos) Begin
+        Decrement iRoundPos
+    End
+    Move (Mid (sData, 1, iRoundPos - 1)) To iDigit
+    Increment iDigit
+    If (iDigit = 10) Begin
+        Move (Overstrike ("0", sData, iRoundPos - 1)) To sData
+        If ((iRoundPos - 2) = iDecimalSeparatorPos) Begin
+            Decrement iRoundPos
+        End
+        Get RoundDecimal sData iDecimalSeparatorPos (iRoundPos - 1) To sData
+    End
+    Else Begin
+        If (iRoundPos <= 1) Begin
+            Move (String (iDigit) + sData) To sData
+        End
+        Else Begin
+            Move (Overstrike (iDigit, sData, iRoundPos - 1)) To sData
+        End
+    End
+
+    Function_Return sData
+End_Function
+
+// This function does format a numeric value by using a new developed RoundDecimal function.
+// Too large values will be returned with asterixs Numbers can be preceded with prefix zeroes.
+Function FormatDecimal Real rInputVal Integer iWholeDigits Integer iDecimals Boolean bPrefixWithZeroes Returns String
+    String sData sDecimalSeparator
+    Integer iDecimalSeparator iDecimalSeparatorPos iRoundPos
+
+    If (iDecimals < 0 Or iDecimals > 8) Begin
+        Error DFERR_OPERATOR "Number of decimals must be between 0 and 8"
+        Function_Return sData
+    End
+
+    If (iWholeDigits < 0 Or iWholeDigits > 15) Begin
+        Error DFERR_OPERATOR "Number of digits before the decimal separator must be between 0 and 14"
+        Function_Return sData
+    End
+
+    Get_Attribute DF_DECIMAL_SEPARATOR To iDecimalSeparator
+    Move (Character (iDecimalSeparator)) To sDecimalSeparator
+
+    Move rInPutVal To sData
+    Move (Pos (sDecimalSeparator, sData)) To iDecimalSeparatorPos
+    If (iDecimalSeparatorPos = 0) Begin
+        If (Length (sData) > iWholeDigits) Begin
+            Move (Repeat ("*", iWholeDigits)) To sData
+            Function_Return sData
+        End
+        If (iDecimals > 0) Begin
+            Move (sData + sDecimalSeparator) To sData
+            Move (Length (sData)) To iDecimalSeparatorPos
+        End
+    End
+    If (iDecimalSeparatorPos > 0) Begin
+        Move (iDecimalSeparatorPos + iDecimals + 1) To iRoundPos
+        If (Integer (Mid (sData, 1, iRoundPos)) >= 5) Begin
+            Get RoundDecimal sData iDecimalSeparatorPos iRoundPos To sData
+            Move (Pos (sDecimalSeparator, sData)) To iDecimalSeparatorPos
+        End
+    End
+    Move (Left (sData + Repeat ("0", iDecimals), iWholeDigits + iDecimalSeparatorPos + iDecimals)) To sData
+    If (rInputVal < 0) Begin
+        If (iDecimalSeparatorPos > 0) Begin
+            If (Left (sData, 1) = "-") Begin
+                Move (Right (sData, Length (sData) - 1)) To sData
+                Decrement iDecimalSeparatorPos
+            End
+            If (iDecimalSeparatorPos <= iWholeDigits) Begin
+                If (iDecimals > 0) Begin
+                    If (bPrefixWithZeroes) Begin
+                        Move ("-" - Right (Repeat ("0", iWholeDigits - 2) + Left (sData, iDecimalSeparatorPos), iWholeDigits) + Mid (sData, iDecimals, iDecimalSeparatorPos + 1)) To sData
+                    End
+                    Else Begin
+                        Move ("-" - Left (sData, iDecimalSeparatorPos) + Mid (sData, iDecimals, iDecimalSeparatorPos + 1)) To sData
+                    End
+                End
+                Else Begin
+                    If (bPrefixWithZeroes) Begin
+                        Move ("-" - Right (Repeat ("0", iWholeDigits - 2) + Left (sData, iDecimalSeparatorPos - 1), iWholeDigits - 1) + Mid (sData, iDecimals, iDecimalSeparatorPos + 1)) To sData
+                    End
+                    Else Begin
+                        Move ("-" - Left (sData, iDecimalSeparatorPos - 1) + Mid (sData, iDecimals, iDecimalSeparatorPos + 1)) To sData
+                    End
+                End
+            End
+            Else Begin
+                If (iDecimals > 0) Begin
+                    Move (Repeat ("*", iWholeDigits) + sDecimalSeparator + Repeat ("*", iDecimals)) To sData
+                End
+                Else Begin
+                    Move (Repeat ("*", iWholeDigits)) To sData
+                End
+            End
+        End
+        Else Begin
+            If (Left (sData, 1) = "-") Begin
+                Move (Right (sData, Length (sData) - 1)) To sData
+            End
+            If (bPrefixWithZeroes) Begin
+                Move ("-" - Right (Repeat ("0", iWholeDigits - 1) + sData, iWholeDigits)) To sData
+            End
+            Else Begin
+                Move ("-" - Right (sData, iWholeDigits)) To sData
+            End
+        End
+    End
+    Else Begin
+        If (iDecimalSeparatorPos > 0) Begin
+            If ((iDecimalSeparatorPos - 1) <= iWholeDigits) Begin
+                If (iDecimals > 0) Begin
+                    If (bPrefixWithZeroes) Begin
+                        Move (Right (Repeat ("0", iWholeDigits) + Left (sData, iDecimalSeparatorPos), iWholeDigits + 1) + Left (Right (sData, Length (sData) - iDecimalSeparatorPos), iDecimals)) To sData
+                    End
+                    Else Begin
+                        Move (Left (sData, iDecimalSeparatorPos) + Mid (sData, iDecimals, iDecimalSeparatorPos + 1)) To sData
+                    End
+                End
+                Else Begin
+                    If (bPrefixWithZeroes) Begin
+                        Move (Right (Repeat ("0", iWholeDigits) + Left (sData, iDecimalSeparatorPos - 1), iWholeDigits)) To sData
+                    End
+                    Else Begin
+                        Move (Left (Left (sData, iDecimalSeparatorPos - 1), iWholeDigits)) To sData
+                    End
+                End
+            End
+            Else Begin
+                Move (Repeat ("*", iWholeDigits) + sDecimalSeparator + Repeat ("*", iDecimals)) To sData
+            End
+        End
+        Else Begin
+            If (bPrefixWithZeroes) Begin
+                Move (Right (Repeat ("0", iWholeDigits) + sData, iWholeDigits)) To sData
+            End
+            Else Begin
+                If (Length (sData) > iWholeDigits) Begin
+                    Move (Repeat ("*", iWholeDigits)) To sData
+                End
+                Else Begin
+                    Move (Left (sData, iWholeDigits)) To sData
+                End
+            End
+        End
+    End
+
+    Function_Return sData
+End_Function
+
+Object oMainPanel Is A BasicPanel
+    Property Integer piExportFileNum Customer.File_Number
+    Property Integer piRecordOrdering 1
+    { DesignTime = False }
+    Property tSelectedField[] pSelectedFields // This property might get a value later
+    { DesignTime = False }
+    Property String psRecordSelectionCriteria "" // This property might get a value later
+
+    Set Size To 187 267
+    Set Border_Style To Border_Dialog
+    Set Locate_Mode To Center_On_Screen
+    Set Label To "Export data"
+    Set Maximize_Icon To False
+    Set peNeighborhood To nhPublic
+    Set Icon To "Default.Ico"
+
+    Object oCommandBarSystem is a cCJCommandBarSystem
+        Move Self to ghoCommandBars
+    End_Object
+
+    Object oContainer Is A Group
+        Set Size To 163 256
+        Set Location To 6 6
+
+        Object oExportFormatRadioGroup Is A RadioGroup
+            Set Size To 65 86
+            Set Location To 6 6
+            Set Label To "Exportformat"
+
+            // This object creates a radio button which when selected expresses the
+            // choice to export in comma separated format.
+            Object oCSVRadio Is A Radio
+                Set Location To 12 6
+                Set Label To "Comma Separated"
+            End_Object
+
+            // This object creates a radio button which when selected expresses the
+            // choice to export in line delimited format.
+            Object oLineDelimitedRadio Is A Radio
+                Set Location To 24 6
+                Set Label To "Line delimited"
+            End_Object
+
+            // This object creates a radio button which when selected expresses the
+            // choice to export in fixed column format.
+            Object oFixedPositionRadio Is A Radio
+                Set Location To 36 6
+                Set Label To "Fixed position"
+            End_Object
+
+            // This object creates a radio button which when selected expresses the
+            // choice to export in XML format.
+            Object oXMLRadio Is A Radio
+                Set Location To 48 6
+                Set Label To "XML"
+            End_Object
+
+            // This is a standard notification message - an event without the 'ON'
+            // prefix - and we use it to shadow the startbutton if needed and/or shadow
+            // the fieldseparator form window when the current radio is not set to CSV
+            // output format.
+            Procedure Notify_Select_State Integer iToExportFormatRadio Integer iFromExportFormatRadio
+                Delegate Send DoDisableFieldSeparator (iToExportFormatRadio <> 0)
+                Delegate Send DoControlStartExportButton
+                Delegate Send DoChangeDefaultFileExtension iToExportFormatRadio
+                Delegate Send DoDisableExportOptions (iToExportFormatRadio + 1)
+            End_Procedure
+        End_Object
+
+        // This object lets the user change the field separator for CSV files
+        Object oFieldSeparator Is A Form
+            Set Size To 13 40
+            Set Location To 73 59
+            Set Label To "Field separator:"
+            Set Label_Justification_Mode To jMode_Right
+            Set Label_Col_Offset To 2
+
+            Procedure OnChange
+                Send DoControlStartExportButton
+            End_Procedure
+        End_Object
+
+        // This object makes a connection between DataFlex and the Windows common
+        // file dialog to make filename search possible.
+        Object oFileNameDialog Is A SaveAsDialog
+            Set Dialog_Caption To 'Select a filename for'
+            Set FileMustExist_State To False
+            Set HideReadOnly_State To True
+            Set NoChangeDir_State To True
+            Set Filter_String To "Comma delimited|*.Csv|Line delimited|*.Asc|Fixed position|*.Lst|XML|*.Xml|All files|*.*"
+        End_Object
+
+        // With this object the user can enter or select the export filename
+        Object oExportFileName Is A Form
+            Set Size To 13 206
+            Set Location To 144 41
+            Set Label To "Filename:"
+            Set Label_Justification_Mode To jMode_Right
+            Set Label_Col_Offset To 2
+            Set Prompt_Button_Mode To PB_PromptOn
+
+            //  This procedure pops up the commonfiledialog object to select a filename
+            Procedure Prompt
+                Boolean bOk
+                String sPath sFileName
+                Handle hoWorkspace
+
+                Get Value To sPath
+                Move (Trim (sPath)) To sPath
+                If (sPath <> "") Begin
+                    Set File_Title Of oFileNameDialog To sPath
+                    Move (ExtractFilePath (sPath)) To sPath
+                End
+                Else Begin
+                    Get phoWorkspace of ghoApplication to hoWorkspace
+                    Get psDataPath of hoWorkspace to sPath
+                    Get PathAtIndex of hoWorkspace sPath 1 to sPath
+                End
+
+                If (sPath <> "") Begin
+                    Set Initial_Folder Of oFileNameDialog To sPath
+                End
+                Get Show_Dialog Of oFileNameDialog To bOk
+                If (bOk) Begin
+                    Get File_Name Of oFileNameDialog To sFileName
+                    Set Value To sFileName
+                End
+            End_Procedure
+
+            // When this object contents change and the contents is not empty we will
+            // send a message to inform the parent object of the change.
+            Procedure OnChange
+                Send DoControlStartExportButton
+            End_Procedure
+        End_Object
+
+        Object oExportOptionsGroup Is A Group
+            Set Label To "Options"
+            Set Size To 133 144
+            Set Location To 6 103
+
+            // When the user selects this choice we will export the TEXT fields via the
+            // WRITE_HEX command.
+            Object oExportTextInHex Is A Checkbox
+                Set Size To 10 121
+                Set Location To 11 6
+                Set Label To "Export TEXT fields in HEX format"
+                Set Checked_State To True
+            End_Object
+
+            // When the user selects this choice we will export the BINARY fields via
+            // the WRITE_HEX command.
+            Object oExportBinaryInHex Is A Checkbox
+                Set Size To 10 129
+                Set Location To 26 6
+                Set Label To "Export BINARY fields in HEX format"
+                Set Checked_State To True
+            End_Object
+
+            // When the user selects this choice we will export the fieldnames of each
+            // selected field in the first row of export.
+            Object oExportFieldNames Is A Checkbox
+                Set Size To 10 105
+                Set Location To 41 6
+                Set Label To "Export fieldnames in first row"
+            End_Object
+
+            // When the user selects this choice we will use quotes around the string fields.
+            Object oAddQuotes Is A Checkbox
+                Set Size To 10 135
+                Set Location To 56 6
+                Set Label To "Add double quotes around string data"
+                Set Checked_State To True
+            End_Object
+
+            // When the user selects this choice we will print leading zero's in
+            // numeric output.
+            Object oUseLeadingZero Is A Checkbox
+                Set Size To 10 75
+                Set Location To 71 6
+                Set Label To "Print leading zeros"
+            End_Object
+
+            // When the user selects this choice we will print string data trimmed of
+            // leading and trailing spaces
+            Object oTrimStringData Is A Checkbox
+                Set Size To 10 71
+                Set Location To 86 6
+                Set Label To "Trim string output"
+                Set Checked_State To True
+            End_Object
+
+            // When the user selects this choice we will pad the text fields with spaces.
+            Object oPadText Is A Checkbox
+                Set Size To 10 61
+                Set Location To 101 6
+                Set Label To "Pad text fields"
+            End_Object
+
+            // The user can select the encoding technique to be used when exporting DF_ASCII and DF_TEXT column data
+            Object oEncoding is a ComboForm
+                Set Label to "Encoding"
+                Set Size to 13 59
+                Set Location to 113 40
+                Set Entry_State to False
+                Set Combo_Sort_State to False
+                Set Label_Col_Offset to 2
+                Set Label_Justification_Mode to JMode_Right
+
+                Function ChosenEncodingOption Returns Integer
+                    String sValue
+                    Integer eOption
+
+                    Get Value to sValue
+                    Get Item_Matching sValue to eOption
+
+                    Function_Return eOption
+                End_Function
+
+                Procedure Combo_Fill_List
+                    Forward Send Combo_Fill_List
+
+                    Send Combo_Delete_Data
+
+                    Send Combo_Add_Item "UTF-8"
+                    Send Combo_Add_Item "ANSI"
+                    Send Combo_Add_Item "OEM"
+                End_Procedure
+            End_Object
+
+            // This method will be used to disable checkboxes in the options group
+            // based on the exportformat option
+            Procedure DoDisableOptions Integer iExportFormat
+                Set Enabled_State Of oTrimStringData To (iExportFormat <> C_EXPORTFORMAT_PRINTABLE)
+                Set Enabled_State Of oPadText To (iExportFormat <> C_EXPORTFORMAT_LINEDELIMITED)
+
+                Set Enabled_State Of oExportFieldNames To (iExportFormat <> C_EXPORTFORMAT_XML)
+                Set Checked_State Of oExportFieldNames To False
+
+                Set Enabled_State Of oAddQuotes To (iExportFormat = C_EXPORTFORMAT_LINEDELIMITED Or iExportFormat = C_EXPORTFORMAT_COMMADELIMITED)
+                Set Checked_State Of oAddQuotes To False
+
+                Set Enabled_State Of oUseLeadingZero To (iExportFormat <> C_EXPORTFORMAT_XML)
+                Set Checked_State Of oUseLeadingZero To False
+
+                Set Enabled_State Of oPadText To (iExportFormat <> C_EXPORTFORMAT_XML)
+                Set Checked_State Of oPadText To False
+
+                Set Enabled_State of oEncoding to (iExportFormat <> C_EXPORTFORMAT_XML)
+            End_Procedure
+        End_Object
+
+        // This method will shadow the field separator form window when the user
+        // does not select the comma separated value radio button. Comma separated
+        // does not means comma separated but a special character (usually a comma)
+        // as separator.
+        Procedure DoDisableFieldSeparator Boolean bState
+            Set Enabled_State Of oFieldSeparator To (Not (bState))
+        End_Procedure
+
+        // This method will be used to disable checkboxes in the options group
+        // based on the exportformat option
+        Procedure DoDisableExportOptions Integer iExportFormat
+            Send DoDisableOptions Of oExportOptionsGroup iExportFormat
+        End_Procedure
+
+        // This function returns the user choice for the character(s) to be used
+        // to separate fields in the output.
+        Function FieldSeparator Returns String
+            String sFieldSeparator
+
+            Get Value Of oFieldSeparator To sFieldSeparator
+
+            Function_Return sFieldSeparator
+        End_Function
+
+        // This function returns the user choice for export format beiing one of
+        // the choices comma delimited, line delimited or fix column.
+        Function SelectedOutputFormat Returns Integer
+            Integer iSelectedOutputFormat
+
+            Get Current_Radio Of oExportFormatRadioGroup To iSelectedOutputFormat
+            Increment iSelectedOutputFormat
+
+            Function_Return iSelectedOutputFormat
+        End_Function
+
+        // This method will set the default filter for the fileselector dialog to
+        // the chosen filetype
+        Procedure DoChangeDefaultFileExtension Integer iType
+            Set Filter_Index Of oFileNameDialog To (iType + 1)
+        End_Procedure
+
+        // This function returns the value entered in the form object which can be
+        // used as filename for exporting data
+        Function ExportFileName Returns String
+            String sFileName sPath sDirSep
+            Handle hoWorkSpace
+
+            Get Value Of oExportFileName To sFileName
+
+            Move (ExtractFilePath (sFileName)) To sPath
+            Move (ExtractFileName (sFileName)) To sFileName
+
+            Get phoWorkSpace Of ghoApplication To hoWorkSpace
+
+            Move (Trim (sPath)) To sPath
+            If (sPath = "") Begin
+                Get psDataPath Of hoWorkSpace To sPath
+                Get PathAtIndex Of hoWorkspace sPath 1 To sPath
+            End
+
+            If (sPath <> "") Begin
+                Move (Sysconf (SYSCONF_DIR_SEPARATOR)) To sDirSep
+                If (Right (sPath, 1) <> sDirSep) Begin
+                    Move (sPath + sDirSep) To sPath
+                End
+            End
+
+            Function_Return (sPath - sFileName)
+        End_Function
+    End_Object
+
+    // This button will start the export operation. The button can be disabled during the 
+    // process of operation to make it temporarily unavailable.
+    Object oStartButton Is A Button
+        Set Size To 14 50
+        Set Location To 171 212
+        Set Label To "Start"
+        Set Enabled_State To False
+
+        // When the user clicks the button this event is received and it
+        // will start the output/export process.
+        Procedure OnClick
+            Send DoRunExport
+        End_Procedure
+    End_Object
+
+    // This object will close the panel when clicked
+    Object oCloseButton Is A Button
+        Set Size To 14 50
+        Set Location To 171 160
+        Set Label To "Close"
+
+        // Close the current panel when clicked
+        Procedure OnClick
+            Send Close_Panel
+        End_Procedure
+    End_Object
+
+    // When the panel is activated we need to set the defaults for the formats
+    // radiogroup as well as the default value for the fieldseparator.
+    Procedure Activating
+        String sListSeparator
+
+        Forward Send Activating
+
+        Set Current_Radio Of oExportFormatRadioGroup To 0
+
+        Move (LocaleListSeparator ()) To sListSeparator
+        Set Value Of oFieldSeparator To sListSeparator
+    End_Procedure
+
+    // This method can be used to add selectioncriteria data to the property to
+    // bypass the maximum compiler line length which might be exceeded.
+    Procedure DoAddSelectionCriteria String sCriteria
+        String sCurrentCriteria
+
+        If (sCriteria <> "") Begin
+            Get psRecordSelectionCriteria To sCurrentCriteria
+            Move (sCurrentCriteria + sCriteria) To sCurrentCriteria
+            Set psRecordSelectionCriteria To sCurrentCriteria
+        End
+    End_Procedure
+
+    // This method will set the start button to enabled when all required
+    // choices are made.
+    Procedure DoControlStartExportButton
+        String sFieldSeparator sExportFileName
+
+        Get FieldSeparator Of oContainer To sFieldSeparator
+        Get ExportFileName Of oContainer To sExportFileName
+        Set Enabled_State Of oStartButton To (Not (sFieldSeparator = "" Or sExportFileName = ""))
+    End_Procedure
+
+    // This procedure will write the columntitles into the output device
+    Procedure DoWriteColumnTitles Integer iChannel Integer iExportFormat tSelectedField[] SelectedFields Boolean bAddQuotes
+        String sSeparator sQuote
+        Integer iColumnWidth iElements iElement
+        Boolean bFirstAtLine
+
+        Get FieldSeparator Of oContainer To sSeparator
+        Move True To bFirstAtLine
+
+        Move (Character (34)) To sQuote
+
+        Move (SizeOfArray (SelectedFields)) To iElements
+        Decrement iElements
+
+        For iElement From 0 To iElements
+            If (SelectedFields[iElement].sFieldName <> "") Begin
+                Case Begin
+                    Case (iExportFormat = C_EXPORTFORMAT_COMMADELIMITED)
+                        If (Not (bFirstAtLine)) Begin
+                            Write Channel iChannel sSeparator
+                        End
+                        Move False To bFirstAtLine
+                        If (bAddQuotes) Begin
+                            Write Channel iChannel sQuote SelectedFields[iElement].sFieldName sQuote
+                        End
+                        Else Begin
+                            Write Channel iChannel SelectedFields[iElement].sFieldName
+                        End
+                        Case Break
+                    Case (iExportFormat = C_EXPORTFORMAT_LINEDELIMITED)
+                        If (bAddQuotes) Begin
+                            Writeln Channel iChannel sQuote SelectedFields[iElement].sFieldName sQuote
+                        End
+                        Else Begin
+                            Writeln Channel iChannel SelectedFields[iElement].sFieldName
+                        End
+                        Case Break
+                    Case (iExportFormat = C_EXPORTFORMAT_PRINTABLE)
+                        Move SelectedFields[iElement].iLength To iColumnWidth
+                        If (SelectedFields[iElement].iPrecision > 0) Begin
+                            Move (iColumnWidth + SelectedFields[iElement].iPrecision + 1) To iColumnWidth
+                        End
+                        Move (iColumnWidth Max Length (SelectedFields[iElement].sFieldName)) To iColumnWidth
+                        Write Channel iChannel (Pad (SelectedFields[iElement].sFieldName, iColumnWidth + 1))
+                        Case Break
+                    Case Else
+                        Send Stop_Box "Wrong export type" "Export Panel"
+                        Case Break
+                Case End
+            End
+        Loop
+
+        If (iExportFormat <> C_EXPORTFORMAT_LINEDELIMITED) Begin
+            Writeln Channel iChannel
+        End
+    End_Procedure
+
+    // This method will run the whole process of exporting. It will open the
+    // output file, find the records and export
+    Procedure DoRunExport
+        Boolean bUserCancel bOpened bEof bTextAsHex bBinAsHex bAddQuotes
+        Boolean bUseLeadingZero bTrimStringData bPadText bXMLOk bColumnTitles
+        Integer iFile iOrdering iDecimalSeparator iSet eEncodingOption
+        Integer iRecordDone iExportFormat iChannel iSaveErr
+        Integer iMaxFilelistSlotCount
+        Handle hoStatusPanel hoXML hoXMLDocumentRoot
+        String sUserDisplayName sSelectionCriteria
+        tSelectedField[] SelectedFields
+        String sExportFileName sLogicalName
+        Number ncRecord
+
+        Get MaxFilelistSlotCount To iMaxFilelistSlotCount
+
+        Get piExportFileNum To iFile
+        If (iFile < 1 Or iFile > iMaxFilelistSlotCount) Begin
+            Send Stop_Box ("Invalid filenumber" * String (iFile) * "for export!") "DbExport Program"
+            Procedure_Return
+        End
+
+        Get ExportFileName Of oContainer To sExportFileName
+        Get SelectedOutputFormat Of oContainer To iExportFormat
+
+        Move DF_SEQ_CHANNEL_NOT_AVAILABLE To iChannel
+
+        If (iExportFormat = C_EXPORTFORMAT_XML) Begin
+            Get Create U_cXMLDOMDocument To hoXML
+            Set pbPreserveWhiteSpace Of hoXML To True
+        End
+        Else Begin
+            Get Seq_Open_Output_Channel sExportFileName To iChannel
+            If (iChannel <= DF_SEQ_CHANNEL_ERROR) Begin
+                Send Stop_Box ("Cannot open output device:" * sExportFileName) "DbExport Program"
+                Procedure_Return
+            End
+        End
+
+        Get pSelectedFields To SelectedFields
+
+        Get piRecordOrdering To iOrdering
+
+        Get Checked_State Of oExportTextInHex To bTextAsHex
+        Get Checked_State Of oExportBinaryInHex To bBinAsHex
+        Get Checked_State Of oExportFieldNames To bColumnTitles
+        Get Checked_State Of oAddQuotes To bAddQuotes
+        Get Checked_State Of oUseLeadingZero To bUseLeadingZero
+        Get Checked_State Of oTrimStringData To bTrimStringData
+        Get Checked_State Of oPadText To bPadText
+        Get ChosenEncodingOption of oEncoding to eEncodingOption
+
+        Get_Attribute DF_FILE_DISPLAY_NAME Of iFile To sUserDisplayName
+        Get_Attribute DF_FILE_LOGICAL_NAME Of iFile To sLogicalName
+        Get_Attribute DF_FILE_RECORDS_USED Of iFile To ncRecord
+
+        Move Status_Panel To hoStatusPanel
+        Send Initialize_StatusPanel Of hoStatusPanel ;
+            "Exporting data" ("From" * sUserDisplayName) ""
+        Send Start_StatusPanel Of hoStatusPanel
+
+        If (bColumnTitles And hoXML = 0) Begin
+            Send DoWriteColumnTitles iChannel iExportFormat SelectedFields bAddQuotes
+        End
+
+        If (hoXML <> 0) Begin
+            Set psDocumentName Of hoXML To sExportFileName
+            If (sLogicalName = "") Begin
+                Move "Data" To sLogicalName
+            End
+            Get CreateDocumentElement Of hoXML sLogicalName To hoXMLDocumentRoot
+        End
+
+        Get psRecordSelectionCriteria To sSelectionCriteria
+        If (sSelectionCriteria = "") Begin
+            Move 0 To iRecordDone
+            Clear iFile
+            Repeat
+                Vfind iFile iOrdering Gt
+                Move (Finderr) To bEof
+                If (Not (bEof)) Begin
+                    Increment iRecordDone
+                    Get Check_StatusPanel Of hoStatusPanel To bUserCancel
+                    Send Update_StatusPanel Of hoStatusPanel ( "Percentage done:" * ;
+                        String (Integer ((iRecordDone / ncRecord) * 100.0)))
+                    Case Begin
+                        Case (iExportFormat = C_EXPORTFORMAT_COMMADELIMITED)
+                            Send DoWriteOutCommaData iChannel SelectedFields ;
+                                bTextAsHex bBinAsHex bAddQuotes iDecimalSeparator ;
+                                bUseLeadingZero bTrimStringData bPadText eEncodingOption
+                            Case Break
+                        Case (iExportFormat = C_EXPORTFORMAT_LINEDELIMITED)
+                            Send DoWriteOutLineData iChannel SelectedFields ;
+                                bTextAsHex bBinAsHex bAddQuotes iDecimalSeparator ;
+                                bUseLeadingZero bTrimStringData eEncodingOption
+                            Case Break
+                        Case (iExportFormat = C_EXPORTFORMAT_PRINTABLE)
+                            Send DoWriteOutFixedData iChannel SelectedFields ;
+                                bTextAsHex bBinAsHex iDecimalSeparator ;
+                                bUseLeadingZero bPadText eEncodingOption
+                            Case Break
+                        Case (iExportFormat = C_EXPORTFORMAT_XML)
+                            Send DoWriteXMLData hoXMLDocumentRoot SelectedFields ;
+                                bTextAsHex bBinAsHex bTrimStringData
+                            Case Break
+                        Case Else
+                            Send Stop_Box "Wrong export type" "DbExport Program"
+                            Case Break
+                    Case End
+                End
+            Until (bEof Or bUserCancel)
+        End
+        Else Begin
+            Move 0 To Constrain_Tests_Count
+            Move (Random (1000) + 1) To iSet
+            Constraint_Set iSet Clear
+            Vconstrain iFile As (Integer (Eval (sSelectionCriteria)))
+            Constrained_Find First iFile By iOrdering
+            Move (Finderr) To bEof
+            While (Not (bEof) And Not (bUserCancel))
+                Get Check_StatusPanel Of hoStatusPanel To bUserCancel
+                Send Update_StatusPanel Of hoStatusPanel ("Percentage done:" * ;
+                    String (Integer ((Constrain_Tests_Count / ncRecord) * 100.0)))
+                Case Begin
+                    Case (iExportFormat = C_EXPORTFORMAT_COMMADELIMITED)
+                        Send DoWriteOutCommaData iChannel SelectedFields ;
+                            bTextAsHex bBinAsHex bAddQuotes iDecimalSeparator ;
+                            bUseLeadingZero bTrimStringData bPadText eEncodingOption
+                        Case Break
+                    Case (iExportFormat = C_EXPORTFORMAT_LINEDELIMITED)
+                        Send DoWriteOutLineData iChannel SelectedFields ;
+                            bTextAsHex bBinAsHex bAddQuotes iDecimalSeparator ;
+                            bUseLeadingZero bTrimStringData eEncodingOption
+                        Case Break
+                    Case (iExportFormat = C_EXPORTFORMAT_PRINTABLE)
+                        Send DoWriteOutFixedData iChannel SelectedFields ;
+                            bTextAsHex bBinAsHex iDecimalSeparator ;
+                            bUseLeadingZero bPadText eEncodingOption
+                        Case Break
+                    Case (iExportFormat = C_EXPORTFORMAT_XML)
+                        Send DoWriteXMLData hoXMLDocumentRoot SelectedFields ;
+                            bTextAsHex bBinAsHex bTrimStringData
+                        Case Break
+                    Case Else
+                        Send Stop_Box "Wrong export type" "DbExport Program"
+                        Case Break
+                Case End
+                Constrained_Find Next
+                Move (Finderr) To bEof
+            End
+        End
+
+        If (hoXML <> 0 And hoXMLDocumentRoot <> 0) Begin
+            Send Destroy Of hoXMLDocumentRoot
+            Get SaveXMLDocument Of hoXML To iSaveErr
+            Send Destroy Of hoXML
+        End
+
+        Send Stop_StatusPanel Of hoStatusPanel
+        If (hoXML = 0) Begin
+            Send Seq_Close_Channel iChannel
+        End
+    End_Procedure
+
+    // This function converts the passed numeric value into a hexadecimal value
+    Function DecimalToHexaDecimal Integer iDecimalValue Returns String
+        String sHexValue
+
+        Repeat
+            Move (Insert (Mid ("0123456789ABCDEF", 1, ((iDecimalValue iAnd |CI$0F) + 1)), sHexValue, 1)) To sHexValue
+            Move (iDecimalValue / |CI$10) To iDecimalValue
+        Until (iDecimalValue = 0)
+
+        Function_Return sHexValue
+    End_Function
+
+    // This function converts the passed parameter into two-byte HEX values
+    Function ToHex String sData Returns String
+        String sHexData sHexValue
+        Integer iLength iPos iCharacter
+
+        Move (Length (sData)) To iLength
+        For iPos From 1 To iLength
+            Move (Ascii (Mid (sData, 1, iPos))) To iCharacter
+            Get DecimalToHexaDecimal iCharacter To sHexValue
+            Move (sHexData + sHexValue) To sHexData
+        Loop
+
+        Function_Return sHexData
+    End_Function
+
+    // This method is used to export the XML data
+    Procedure DoWriteXMLData Integer hoXMLDocumentRoot tSelectedField[] SelectedFields Boolean bTextAsHex Boolean bBinAsHex Boolean bTrimStringData
+        Handle hoRow hoField
+        Integer iElements iElement
+        String sFieldValue
+        Number nFieldValue
+        Date dFieldValue
+        DateTime dtFieldValue
+
+        Get AddElement Of hoXMLDocumentRoot "Row" "" To hoRow
+        If (hoRow <> 0) Begin
+            Move (SizeOfArray (SelectedFields)) To iElements
+            Decrement iElements
+            For iElement From 0 To iElements
+                If (SelectedFields[iElement].iFieldNumber >= 0) Begin
+                    Case Begin
+                        Case (SelectedFields[iElement].iFieldType = DF_ASCII)
+                            Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                            If (bTrimStringData) Begin
+                                Get AddElement Of hoRow "Column" (Trim (sFieldValue)) To hoField
+                            End
+                            Else Begin
+                                Get AddElement Of hoRow "Column" sFieldValue To hoField
+                            End
+                            Case Break
+                        Case (SelectedFields[iElement].iFieldType = DF_BCD)
+                            Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To nFieldValue
+                            Get AddElement Of hoRow "Column" nFieldValue To hoField
+                            Case Break
+                        Case (SelectedFields[iElement].iFieldType = DF_DATE)
+                            Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To dFieldValue
+                            Get AddElement Of hoRow "Column" dFieldValue To hoField
+                            Case Break
+                        Case (SelectedFields[iElement].iFieldType = DF_DATETIME)
+                            Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To dtFieldValue
+                            Get AddElement Of hoRow "Column" dtFieldValue To hoField
+                            Case Break
+                        Case (SelectedFields[iElement].iFieldType = DF_TEXT)
+                            Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                            If (bTextAsHex) Begin
+                                Get ToHex sFieldValue To sFieldValue
+                            End
+                            Get AddElement Of hoRow "Column" sFieldValue To hoField
+                            Case Break
+                        Case (SelectedFields[iElement].iFieldType = DF_BINARY)
+                            Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                            If (bBinAsHex) Begin
+                                Get ToHex sFieldValue To sFieldValue
+                            End
+                            Get AddElement Of hoRow "Column" sFieldValue To hoField
+                            Case Break
+                    Case End
+                    If (hoField <> 0) Begin
+                        Send AddAttribute Of hoField "Number" SelectedFields[iElement].iFieldNumber
+                        Send AddAttribute Of hoField "Name" SelectedFields[iElement].sFieldName
+                        Send Destroy Of hoField
+                    End
+                End
+            End
+
+            Send Destroy Of hoRow
+        End
+    End_Procedure
+
+    // This routine writes out the current record buffer in the fixed position format
+    Procedure DoWriteOutFixedData Integer iChannel tSelectedField[] SelectedFields ;
+        Boolean bTextAsHex Boolean bBinAsHex Integer iDecimalSeparator ;
+        Boolean bUseLeadingZero Boolean bPadText Boolean eEncodingOption
+
+        Integer iElements iElement iColumnWidth iLength
+        Number nFieldValue
+        String sFieldValue
+        Date dFieldValue
+        DateTime dtFieldValue
+
+        Move (SizeOfArray (SelectedFields)) To iElements
+        Decrement iElements
+        For iElement From 0 To iElements
+            Move (SelectedFields[iElement].iLength + SelectedFields[iElement].iPrecision) To iColumnWidth
+            Move (iColumnWidth max Length (SelectedFields[iElement].sFieldName)) to iColumnWidth
+
+            Case Begin
+                Case (SelectedFields[iElement].iFieldType = DF_ASCII)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                    Move (Pad (sFieldValue, iColumnWidth)) to sFieldValue
+                    Case Begin
+                        Case (eEncodingOption = C_ANSI_ENCODING)
+                            Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                            Case Break
+                        Case (eEncodingOption = C_OEM_ENCODING)
+                            Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                            Case Break
+                        Case End
+                    Write channel iChannel sFieldValue
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_BCD)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To nFieldValue
+                    Get FormatDecimal nFieldValue SelectedFields[iElement].iLength SelectedFields[iElement].iPrecision bUseLeadingZero To sFieldValue
+                    Write Channel iChannel (Pad (sFieldValue, SelectedFields[iElement].iLength ))
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_DATE)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To dFieldValue
+                    Write Channel iChannel (Pad (dFieldValue, SelectedFields[iElement].iLength))
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_DATETIME)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To dtFieldValue
+                    Write Channel iChannel (Pad (dtFieldValue, SelectedFields[iElement].iLength))
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_TEXT)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                    If (bPadText) Begin
+                        Move (Pad (sFieldValue, iColumnWidth)) to sFieldValue
+                        Case Begin
+                            Case (eEncodingOption = C_ANSI_ENCODING)
+                                Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                Case Break
+                            Case (eEncodingOption = C_OEM_ENCODING)
+                                Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                Case Break
+                        Case End
+                        If (bTextAsHex) Begin
+                            Write_Hex channel iChannel sFieldValue
+                        End
+                        Else Begin
+                            Write channel iChannel sFieldValue
+                        End
+                    End
+                    Else Begin
+                        If (bTextAsHex) Begin
+                            Move (iColumnWidth - (2.0 * Length (sFieldValue))) to iLength
+                            Move (Left (sFieldValue, Length (sFieldValue) min iColumnWidth)) to sFieldValue
+                            Case Begin
+                                Case (eEncodingOption = C_ANSI_ENCODING)
+                                    Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                    Case Break
+                                Case (eEncodingOption = C_OEM_ENCODING)
+                                    Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                    Case Break
+                            Case End
+                            Write_Hex channel iChannel sFieldValue
+                            Write channel iChannel (Repeat (" ", iLength))
+                        End
+                        Else Begin
+                            Move (iColumnWidth - Length (sFieldValue)) to iLength
+                            Move (Left (sFieldValue, Length (sFieldValue) min iColumnWidth)) to sFieldValue
+                            Case Begin
+                                Case (eEncodingOption = C_ANSI_ENCODING)
+                                    Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                    Case Break
+                                Case (eEncodingOption = C_OEM_ENCODING)
+                                    Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                    Case Break
+                            Case End
+                            Write channel iChannel sFieldValue
+                            Write channel iChannel (Repeat (" ", iLength))
+                        End
+                    End
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_BINARY)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                    If (bBinAsHex) Begin
+                        Write_Hex Channel iChannel sFieldValue
+                        Write Channel iChannel (Repeat (" ", SelectedFields[iElement].iLength - (2.0 * Length (sFieldValue))))
+                    End
+                    Else Begin
+                        Write Channel iChannel sFieldValue
+                        Write Channel iChannel (Repeat (" ", SelectedFields[iElement].iLength - Length (sFieldValue)))
+                    End
+                    Case Break
+            Case End
+            Write Channel iChannel " "
+        End
+        Writeln Channel iChannel
+    End_Procedure
+
+    // This routine writes out the current record buffer in the line delimited format
+    Procedure DoWriteOutLineData Integer iChannel tSelectedField[] SelectedFields ;
+        Boolean bTextAsHex Boolean bBinAsHex Boolean bAddQuotes Integer iDecimalSeparator ;
+        Boolean bUseLeadingZero Boolean bTrimStringData Boolean eEncodingOption
+
+        Integer iElement iElements
+        Number nFieldValue
+        String sFieldValue sQuote
+        Date dFieldValue
+        DateTime dtFieldValue
+
+        Move (Character (34)) To sQuote
+
+        Move (SizeOfArray (SelectedFields)) To iElements
+        Decrement iElements
+        For iElement From 0 To iElements
+            Case Begin
+                Case (SelectedFields[iElement].iFieldType = DF_ASCII)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                    If (bAddQuotes) Begin
+                        If (bTrimStringData) Begin
+                            Move (Trim (Left (sFieldValue, SelectedFields[iElement].iLength))) to sFieldValue
+                            Case Begin
+                                Case (eEncodingOption = C_ANSI_ENCODING)
+                                    Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                    Case Break
+                                Case (eEncodingOption = C_OEM_ENCODING)
+                                    Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                    Case Break
+                            Case End
+                            Write channel iChannel sQuote sFieldValue sQuote
+                        End
+                        Else Begin
+                            Move (Pad (sFieldValue, SelectedFields[iElement].iLength)) to sFieldValue
+                            Case Begin
+                                Case (eEncodingOption = C_ANSI_ENCODING)
+                                    Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                    Case Break
+                                Case (eEncodingOption = C_OEM_ENCODING)
+                                    Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                    Case Break
+                            Case End
+                            Write channel iChannel sQuote sFieldValue sQuote
+                        End
+                    End
+                    Else Begin
+                        If (bTrimStringData) Begin
+                            Move (Trim (Left (sFieldValue, SelectedFields[iElement].iLength))) to sFieldValue
+                            Case Begin
+                                Case (eEncodingOption = C_ANSI_ENCODING)
+                                    Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                    Case Break
+                                Case (eEncodingOption = C_OEM_ENCODING)
+                                    Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                    Case Break
+                            Case End
+                            Write channel iChannel sFieldValue
+                        End
+                        Else Begin
+                            Move (Pad (sFieldValue, SelectedFields[iElement].iLength)) to sFieldValue
+                            Case Begin
+                                Case (eEncodingOption = C_ANSI_ENCODING)
+                                    Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                    Case Break
+                                Case (eEncodingOption = C_OEM_ENCODING)
+                                    Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                    Case Break
+                            Case End
+                            Write channel iChannel sFieldValue
+                        End
+                    End
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_BCD)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To nFieldValue
+                    Get FormatDecimal nFieldValue SelectedFields[iElement].iLength SelectedFields[iElement].iPrecision bUseLeadingZero To sFieldValue
+                    Write Channel iChannel (Trim (sFieldValue))
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_DATE)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To dFieldValue
+                    Write Channel iChannel (Pad (dFieldValue, SelectedFields[iElement].iLength))
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_DATETIME)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To dtFieldValue
+                    Write Channel iChannel (Pad (dtFieldValue, SelectedFields[iElement].iLength))
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_TEXT)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                    Move (Left (sFieldValue, Length (sFieldValue) min SelectedFields[iElement].iLength)) to sFieldValue
+                    Case Begin
+                        Case (eEncodingOption = C_ANSI_ENCODING)
+                            Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                            Case Break
+                        Case (eEncodingOption = C_OEM_ENCODING)
+                            Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                            Case Break
+                    Case End
+                    If (bTextAsHex) Begin
+                        Write_Hex channel iChannel sFieldValue
+                    End
+                    Else Begin
+                        If (bAddQuotes) Begin
+                            Write channel iChannel sQuote sFieldValue sQuote
+                        End
+                        Else Begin
+                            Write channel iChannel sFieldValue
+                        End
+                    End
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_BINARY)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                    If (bBinAsHex) Begin
+                        Write_Hex Channel iChannel sFieldValue
+                    End
+                    Else Begin
+                        Write Channel iChannel sFieldValue
+                    End
+                    Case Break
+            Case End
+            Writeln Channel iChannel
+        End
+    End_Procedure
+
+    // This routine writes out the current record buffer in the comma delimited format
+    Procedure DoWriteOutCommaData Integer iChannel tSelectedField[] SelectedFields ;
+        Boolean bTextAsHex Boolean bBinAsHex Boolean bAddQuotes Integer iDecimalSeparator ;
+        Boolean bUseLeadingZero Boolean bTrimStringData Boolean bPadText Boolean eEncodingOption
+
+        Integer iElements iElement
+        Boolean bDataPrinted
+        Number nFieldValue
+        String sFieldSeparator sFieldValue sQuote
+        Date dFieldValue
+        DateTime dtFieldValue
+
+        Move (Character (34)) To sQuote
+
+        Get FieldSeparator Of oContainer To sFieldSeparator
+
+        Move False To bDataPrinted
+
+        Move (SizeOfArray (SelectedFields)) To iElements
+        Decrement iElements
+        For iElement From 0 To iElements
+            If (bDataPrinted) Begin
+                Write Channel iChannel sFieldSeparator
+            End
+            Move True To bDataPrinted
+            Case Begin
+                Case (SelectedFields[iElement].iFieldType = DF_ASCII)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                    If (bAddQuotes) Begin
+                        If (bTrimStringData) Begin
+                            Move (Trim (Left (sFieldValue, SelectedFields[iElement].iLength))) to sFieldValue
+                            Case Begin
+                                Case (eEncodingOption = C_ANSI_ENCODING)
+                                    Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                    Case Break
+                                Case (eEncodingOption = C_OEM_ENCODING)
+                                    Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                    Case Break
+                            Case End
+                            Write channel iChannel sQuote sFieldValue sQuote
+                        End
+                        Else Begin
+                            Move (Pad (sFieldValue, SelectedFields[iElement].iLength)) to sFieldValue
+                            Case Begin
+                                Case (eEncodingOption = C_ANSI_ENCODING)
+                                    Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                    Case Break
+                                Case (eEncodingOption = C_OEM_ENCODING)
+                                    Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                    Case Break
+                            Case End
+                            Write channel iChannel sQuote sFieldValue sQuote
+                        End
+                    End
+                    Else Begin
+                        If (bTrimStringData) Begin
+                            Write channel iChannel (Trim (Left (sFieldValue, SelectedFields[iElement].iLength)))
+                        End
+                        Else Begin
+                            Write channel iChannel (Pad (sFieldValue, SelectedFields[iElement].iLength))
+                        End
+                    End
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_BCD)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To nFieldValue
+                    Get FormatDecimal nFieldValue SelectedFields[iElement].iLength SelectedFields[iElement].iPrecision bUseLeadingZero To sFieldValue
+                    Write Channel iChannel (Trim (sFieldValue))
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_DATE)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To dFieldValue
+                    Write Channel iChannel (Pad (dFieldValue, SelectedFields[iElement].iLength))
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_DATETIME)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To dtFieldValue
+                    Write Channel iChannel (Pad (dtFieldValue, SelectedFields[iElement].iLength))
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_TEXT)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                    If (bPadText) Begin
+                        Move (Left (sFieldValue, SelectedFields[iElement].iLength)) to sFieldValue
+                        Case Begin
+                            Case (eEncodingOption = C_ANSI_ENCODING)
+                                Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                Case Break
+                            Case (eEncodingOption = C_OEM_ENCODING)
+                                Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                Case Break
+                        Case End
+                        If (bTextAsHex) Begin
+                            Write_Hex channel iChannel sFieldValue
+                        End
+                        Else Begin
+                            If (bAddQuotes) Begin
+                                Write channel iChannel sQuote sFieldValue sQuote
+                            End
+                            Else Begin
+                                Write channel iChannel sFieldValue
+                            End
+                        End
+                    End
+                    Else Begin
+                        Move (Left (sFieldValue, Length (sFieldValue) min SelectedFields[iElement].iLength)) to sFieldValue
+                        Case Begin
+                            Case (eEncodingOption = C_ANSI_ENCODING)
+                                Move (Utf8ToAnsi (sFieldValue)) to sFieldValue
+                                Case Break
+                            Case (eEncodingOption = C_OEM_ENCODING)
+                                Move (Utf8ToOem (sFieldValue)) to sFieldValue
+                                Case Break
+                        Case End
+                        If (bTextAsHex) Begin
+                            Write_Hex channel iChannel sFieldValue
+                        End
+                        Else Begin
+                            If (bAddQuotes) Begin
+                                Write channel iChannel sQuote sFieldValue sQuote
+                            End
+                            Else Begin
+                                Write channel iChannel sFieldValue
+                            End
+                        End
+                    End
+                    Case Break
+                Case (SelectedFields[iElement].iFieldType = DF_BINARY)
+                    Get_Field_Value SelectedFields[iElement].iFileNumber SelectedFields[iElement].iFieldNumber To sFieldValue
+                    If (bBinAsHex) Begin
+                        Write_Hex Channel iChannel sFieldValue
+                    End
+                    Else Begin
+                        Write Channel iChannel sFieldValue
+                    End
+                    Case Break
+            Case End
+        End
+        Writeln Channel iChannel
+    End_Procedure
+
+    Procedure DoSetFieldExportInfo
+        tSelectedField[] SelectedFields
+        Integer iElement
+
+        // Field Customer_Number
+        Move 1 To SelectedFields[iElement].iFieldNumber
+        Move 1 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 6 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'Customer_Number' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field Name
+        Move 2 To SelectedFields[iElement].iFieldNumber
+        Move 0 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 30 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'Name' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field Address
+        Move 3 To SelectedFields[iElement].iFieldNumber
+        Move 0 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 30 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'Address' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field City
+        Move 4 To SelectedFields[iElement].iFieldNumber
+        Move 0 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 14 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'City' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field State
+        Move 5 To SelectedFields[iElement].iFieldNumber
+        Move 0 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 2 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'State' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field Zip
+        Move 6 To SelectedFields[iElement].iFieldNumber
+        Move 0 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 10 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'Zip' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field Phone_Number
+        Move 7 To SelectedFields[iElement].iFieldNumber
+        Move 0 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 20 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'Phone_Number' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field Fax_Number
+        Move 8 To SelectedFields[iElement].iFieldNumber
+        Move 0 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 20 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'Fax_Number' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field EMail_Address
+        Move 9 To SelectedFields[iElement].iFieldNumber
+        Move 0 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 30 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'EMail_Address' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field Credit_Limit
+        Move 10 To SelectedFields[iElement].iFieldNumber
+        Move 1 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 6 To SelectedFields[iElement].iLength
+        Move 2 To SelectedFields[iElement].iPrecision
+        Move 'Credit_Limit' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field Purchases
+        Move 11 To SelectedFields[iElement].iFieldNumber
+        Move 1 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 6 To SelectedFields[iElement].iLength
+        Move 2 To SelectedFields[iElement].iPrecision
+        Move 'Purchases' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        // Field Balance
+        Move 12 To SelectedFields[iElement].iFieldNumber
+        Move 1 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 6 To SelectedFields[iElement].iLength
+        Move 2 To SelectedFields[iElement].iPrecision
+        Move 'Balance' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+//        // Field Comments
+//        Move 13 To SelectedFields[iElement].iFieldNumber
+//        Move 5 To SelectedFields[iElement].iFieldType
+//        Move 25 To SelectedFields[iElement].iFileNumber
+//        Move 2044 To SelectedFields[iElement].iLength
+//        Move 0 To SelectedFields[iElement].iPrecision
+//        Move 'Comments' To SelectedFields[iElement].sFieldName
+//        Increment iElement
+
+        // Field Status
+        Move 14 To SelectedFields[iElement].iFieldNumber
+        Move 0 To SelectedFields[iElement].iFieldType
+        Move 25 To SelectedFields[iElement].iFileNumber
+        Move 1 To SelectedFields[iElement].iLength
+        Move 0 To SelectedFields[iElement].iPrecision
+        Move 'Status' To SelectedFields[iElement].sFieldName
+        Increment iElement
+
+        Set pSelectedFields To SelectedFields
+    End_Procedure
+
+    Send DoSetFieldExportInfo
+
+End_Object
+
+Start_Ui oMainPanel
